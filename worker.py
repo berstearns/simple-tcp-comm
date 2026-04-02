@@ -1,8 +1,8 @@
 """Home lab worker — polls DO server, runs jobs against local DBs."""
-import socket, struct, json, time, sys, sqlite3
+import socket, struct, json, time, sys, sqlite3, os
 
-SERVER = ("YOUR_DO_IP", 9999)
-POLL = 2  # seconds
+SERVER = (os.environ.get("QUEUE_HOST", "127.0.0.1"), int(os.environ.get("QUEUE_PORT", "9999")))
+POLL = int(os.environ.get("QUEUE_POLL", "2"))
 
 # -- local sqlite DBs (add your own) --
 DBS = {

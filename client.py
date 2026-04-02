@@ -1,7 +1,7 @@
 """PC client — submit jobs and check status. Zero deps."""
-import socket, struct, json, sys
+import socket, struct, json, sys, os
 
-SERVER = ("YOUR_DO_IP", 9999)
+SERVER = (os.environ.get("QUEUE_HOST", "127.0.0.1"), int(os.environ.get("QUEUE_PORT", "9999")))
 
 def _recv_exact(s, n):
     buf = b""
