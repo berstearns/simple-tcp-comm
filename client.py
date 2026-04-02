@@ -1,5 +1,5 @@
 """PC client — submit jobs and check status. Zero deps."""
-import socket, struct, json, sys, os
+import socket, struct, json, sys, os, env; env.load()
 
 SERVER = (os.environ.get("QUEUE_HOST", "127.0.0.1"), int(os.environ.get("QUEUE_PORT", "9999")))
 

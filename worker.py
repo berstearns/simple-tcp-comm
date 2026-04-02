@@ -1,14 +1,18 @@
 """Home lab worker — polls DO server, runs jobs against local DBs."""
-import socket, struct, json, time, sys, sqlite3, os
+import socket, struct, json, time, sys, sqlite3, os, env; env.load()
 
 SERVER = (os.environ.get("QUEUE_HOST", "127.0.0.1"), int(os.environ.get("QUEUE_PORT", "9999")))
 POLL = int(os.environ.get("QUEUE_POLL", "2"))
 
-# -- local sqlite DBs (add your own) --
-DBS = {
-    "main":  "/var/lib/myapp/main.db",
-    "logs":  "/var/lib/myapp/logs.db",
-}
+# Parse DBS from env: "main=/path/main.db,logs=/path/logs.db"
+# or fall back to hardcoded defaults
+def _parse_dbs():
+    raw = os.environ.get("QUEUE_DBS", "")
+    if raw:
+        return dict(pair.split("=", 1) for pair in raw.split(","))
+    return {"main": "/var/lib/myapp/main.db", "logs": "/var/lib/myapp/logs.db"}
+
+DBS = _parse_dbs()
 
 def _recv_exact(s, n):
     buf = b""
