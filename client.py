@@ -26,6 +26,7 @@ def status(jid):      return rpc({"op": "status", "id": jid})
 def ls(n=20):         return rpc({"op": "list", "n": n})
 def delete(jid):      return rpc({"op": "delete", "id": jid})
 def reset(jid):       return rpc({"op": "reset", "id": jid})
+def workers():        return rpc({"op": "workers"})
 
 # -- convenience shortcuts for common jobs --
 def query(db, sql, params=None):
@@ -54,4 +55,5 @@ if __name__ == "__main__":
     elif cmd == "status": print(status(int(sys.argv[2])))
     elif cmd == "delete": print(delete(int(sys.argv[2])))
     elif cmd == "reset":  print(reset(int(sys.argv[2])))
+    elif cmd == "workers": print(workers())
     elif cmd == "ls":     print(ls())

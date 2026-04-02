@@ -3,6 +3,7 @@ import socket, struct, json, time, sys, sqlite3, os, env; env.load()
 
 SERVER = (os.environ.get("QUEUE_HOST", "127.0.0.1"), int(os.environ.get("QUEUE_PORT", "9999")))
 POLL = int(os.environ.get("QUEUE_POLL", "2"))
+WORKER_NAME = os.environ.get("WORKER_NAME", socket.gethostname())
 
 # Parse DBS from env: "main=/path/main.db,logs=/path/logs.db"
 # or fall back to hardcoded defaults
@@ -71,13 +72,13 @@ def run_job(job_id, payload):
         return {"error": str(e)}
 
 if __name__ == "__main__":
-    print(f"worker polling {SERVER[0]}:{SERVER[1]} every {POLL}s")
+    print(f"worker '{WORKER_NAME}' polling {SERVER[0]}:{SERVER[1]} every {POLL}s")
     while True:
         try:
-            resp = rpc({"op": "poll"})
+            resp = rpc({"op": "poll", "worker": WORKER_NAME})
             if resp.get("id"):
                 result = run_job(resp["id"], resp["payload"])
-                rpc({"op": "ack", "id": resp["id"], "result": result})
+                rpc({"op": "ack", "id": resp["id"], "result": result, "worker": WORKER_NAME})
             else:
                 time.sleep(POLL)
         except (ConnectionRefusedError, ConnectionError) as e:
