@@ -1,5 +1,5 @@
 """Home lab worker — polls DO server, runs jobs against local DBs."""
-import socket, struct, json, time, sys, sqlite3, os, env; env.load()
+import socket, struct, json, time, sys, sqlite3, os, signal, subprocess, env; env.load()
 
 SERVER = (os.environ.get("QUEUE_HOST", "127.0.0.1"), int(os.environ.get("QUEUE_PORT", "9999")))
 POLL = int(os.environ.get("QUEUE_POLL", "2"))
@@ -33,6 +33,26 @@ def rpc(msg):
     s.close()
     return resp
 
+_shutdown = False
+def _handle_sigterm(sig, frame):
+    global _shutdown
+    _shutdown = True
+    print(f"  received signal {sig}, finishing current job then exiting...")
+signal.signal(signal.SIGTERM, _handle_sigterm)
+signal.signal(signal.SIGINT, _handle_sigterm)
+
+def _git_version():
+    """Return short git hash of HEAD, or 'unknown'."""
+    try:
+        r = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True, timeout=5,
+                           cwd=os.path.dirname(os.path.abspath(__file__)))
+        return r.stdout.strip() if r.returncode == 0 else "unknown"
+    except Exception:
+        return "unknown"
+
+VERSION = _git_version()
+
 HANDLERS = {}
 def job(name):
     def dec(f): HANDLERS[name] = f; return f
@@ -52,7 +72,6 @@ def _query(p):
 @job("exec")
 def _exec(p):
     """Run a shell command. Expects: {cmd}"""
-    import subprocess
     r = subprocess.run(p["cmd"], shell=True, capture_output=True, text=True, timeout=300)
     return {"stdout": r.stdout[-10000:], "stderr": r.stderr[-5000:], "rc": r.returncode}
 
@@ -72,15 +91,17 @@ def run_job(job_id, payload):
         return {"error": str(e)}
 
 if __name__ == "__main__":
-    print(f"worker '{WORKER_NAME}' polling {SERVER[0]}:{SERVER[1]} every {POLL}s")
-    while True:
+    print(f"worker '{WORKER_NAME}' v{VERSION} polling {SERVER[0]}:{SERVER[1]} every {POLL}s")
+    while not _shutdown:
         try:
-            resp = rpc({"op": "poll", "worker": WORKER_NAME})
+            resp = rpc({"op": "poll", "worker": WORKER_NAME, "version": VERSION})
             if resp.get("id"):
                 result = run_job(resp["id"], resp["payload"])
-                rpc({"op": "ack", "id": resp["id"], "result": result, "worker": WORKER_NAME})
+                if not _shutdown:
+                    rpc({"op": "ack", "id": resp["id"], "result": result, "worker": WORKER_NAME})
             else:
                 time.sleep(POLL)
         except (ConnectionRefusedError, ConnectionError) as e:
             print(f"  down: {e}, retry in 5s")
             time.sleep(5)
+    print(f"worker '{WORKER_NAME}' shutting down gracefully")

@@ -55,5 +55,11 @@ if __name__ == "__main__":
     elif cmd == "status": print(status(int(sys.argv[2])))
     elif cmd == "delete": print(delete(int(sys.argv[2])))
     elif cmd == "reset":  print(reset(int(sys.argv[2])))
-    elif cmd == "workers": print(workers())
+    elif cmd == "workers":
+        resp = workers()
+        if resp.get("ok"):
+            for w in resp["workers"]:
+                print(f"  {w['name']:20s}  {w.get('version','?'):8s}  {w['ip']:16s}  seen {w['last_seen']}")
+        else:
+            print(resp)
     elif cmd == "ls":     print(ls())

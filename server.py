@@ -59,13 +59,17 @@ def init_db():
         payload TEXT, result TEXT, worker_name TEXT, worker_ip TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP)""")
     db.execute("""CREATE TABLE IF NOT EXISTS workers(
-        name TEXT PRIMARY KEY, ip TEXT, last_seen DATETIME DEFAULT CURRENT_TIMESTAMP)""")
+        name TEXT PRIMARY KEY, ip TEXT, version TEXT,
+        last_seen DATETIME DEFAULT CURRENT_TIMESTAMP)""")
     db.commit()
     # migrate: add columns if missing (existing DBs)
     cols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
     for col in ["worker_name", "worker_ip"]:
         if col not in cols:
             db.execute(f"ALTER TABLE jobs ADD COLUMN {col} TEXT")
+    wcols = {r[1] for r in db.execute("PRAGMA table_info(workers)")}
+    if "version" not in wcols:
+        db.execute("ALTER TABLE workers ADD COLUMN version TEXT")
     db.commit()
     return db
 
@@ -81,9 +85,10 @@ def handle(db, msg, addr=""):
     if op == "poll":
         worker_name = msg.get("worker", "?")
         worker_ip = addr.split(":")[0] if addr else "?"
+        worker_ver = msg.get("version", "?")
         # register/update worker
-        db.execute("INSERT OR REPLACE INTO workers(name, ip, last_seen) VALUES(?, ?, CURRENT_TIMESTAMP)",
-                   [worker_name, worker_ip])
+        db.execute("INSERT OR REPLACE INTO workers(name, ip, version, last_seen) VALUES(?, ?, ?, CURRENT_TIMESTAMP)",
+                   [worker_name, worker_ip, worker_ver])
         row = db.execute("SELECT id, payload FROM jobs WHERE status='pending' ORDER BY id LIMIT 1").fetchone()
         if not row:
             log("INF", op, f"{C['dim']}empty queue{C['reset']} {C['dim']}[{worker_name}]{C['reset']}", addr)
@@ -130,9 +135,9 @@ def handle(db, msg, addr=""):
         log("WRN", op, f"job {C['bold']}#{msg['id']}{C['reset']} → {C['yellow']}pending{C['reset']}", addr)
         return {"ok": True}
     if op == "workers":
-        rows = db.execute("SELECT name, ip, last_seen FROM workers ORDER BY last_seen DESC").fetchall()
+        rows = db.execute("SELECT name, ip, version, last_seen FROM workers ORDER BY last_seen DESC").fetchall()
         log("INF", op, f"{len(rows)} workers registered", addr)
-        return {"ok": True, "workers": [{"name": r[0], "ip": r[1], "last_seen": r[2]} for r in rows]}
+        return {"ok": True, "workers": [{"name": r[0], "ip": r[1], "version": r[2], "last_seen": r[3]} for r in rows]}
     log("ERR", "???", f"unknown op: {C['red']}{op}{C['reset']}", addr)
     return {"ok": False, "err": "unknown op"}
 
