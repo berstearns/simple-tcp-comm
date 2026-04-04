@@ -141,6 +141,26 @@ def handle(db, msg, addr=""):
     log("ERR", "???", f"unknown op: {C['red']}{op}{C['reset']}", addr)
     return {"ok": False, "err": "unknown op"}
 
+# ── Guards (quick-reject before reading payload) ─────────────
+MAX_PAYLOAD = 1 * 1024 * 1024  # 1 MB
+
+GUARDS = []
+def guard(f):
+    GUARDS.append(f)
+    return f
+
+@guard
+def size_limit(size, addr):
+    if size > MAX_PAYLOAD:
+        return "payload too large"
+
+def check_guards(size, addr):
+    for g in GUARDS:
+        err = g(size, addr)
+        if err:
+            return err
+    return None
+
 # ── Network ───────────────────────────────────────────────────
 async def handle_client(r, w):
     addr = w.get_extra_info("peername")
@@ -150,7 +170,15 @@ async def handle_client(r, w):
     try:
         while True:
             hdr = await r.readexactly(4)
-            data = await r.readexactly(struct.unpack("!I", hdr)[0])
+            size = struct.unpack("!I", hdr)[0]
+            err = check_guards(size, addr_str)
+            if err:
+                resp = json.dumps({"ok": False, "err": err}).encode()
+                w.write(struct.pack("!I", len(resp)) + resp)
+                await w.drain()
+                w.close()
+                return
+            data = await r.readexactly(size)
             resp = json.dumps(handle(db, json.loads(data), addr_str)).encode()
             w.write(struct.pack("!I", len(resp)) + resp)
             await w.drain()

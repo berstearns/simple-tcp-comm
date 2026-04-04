@@ -26,6 +26,7 @@ def _recv_exact(s, n):
 
 def rpc(msg):
     s = socket.socket()
+    s.settimeout(10)
     s.connect(SERVER)
     data = json.dumps(msg).encode()
     s.sendall(struct.pack("!I", len(data)) + data)
@@ -36,6 +37,9 @@ def rpc(msg):
 _shutdown = False
 def _handle_sigterm(sig, frame):
     global _shutdown
+    if _shutdown:
+        print(f"\n  forced exit")
+        sys.exit(1)
     _shutdown = True
     print(f"  received signal {sig}, finishing current job then exiting...")
 signal.signal(signal.SIGTERM, _handle_sigterm)
@@ -100,8 +104,9 @@ if __name__ == "__main__":
                 if not _shutdown:
                     rpc({"op": "ack", "id": resp["id"], "result": result, "worker": WORKER_NAME})
             else:
+                print(f"waiting {POLL} seconds.")
                 time.sleep(POLL)
-        except (ConnectionRefusedError, ConnectionError) as e:
+        except OSError as e:
             print(f"  down: {e}, retry in 5s")
             time.sleep(5)
     print(f"worker '{WORKER_NAME}' shutting down gracefully")
