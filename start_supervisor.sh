@@ -17,7 +17,8 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
     exit 0
 fi
 
-tmux new-session -d -s "$SESSION" -c "$SCRIPT_DIR" "$SCRIPT_DIR/supervisor.sh"
+tmux new-session -d -s "$SESSION" -c "$SCRIPT_DIR"
+tmux send-keys -t "$SESSION" "$SCRIPT_DIR/supervisor.sh" Enter
 echo "started supervisor in tmux session '$SESSION'"
 echo "  attach:  tmux attach -t $SESSION"
 echo "  kill:    tmux kill-session -t $SESSION"
