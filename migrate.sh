@@ -89,6 +89,22 @@ add_column_if_missing() {
 log "running migrations..."
 log "databases: ${!DBS[*]}"
 
-# (no migrations yet — add them here as the schema evolves)
+run_sql "${DBS[main]}" "create users table" \
+    "CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );"
+
+run_sql "${DBS[main]}" "create learning_sessions table" \
+    "CREATE TABLE IF NOT EXISTS learning_sessions (
+        id INTEGER PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        topic TEXT,
+        started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        ended_at DATETIME,
+        status TEXT DEFAULT 'active'
+    );"
 
 log "migrations complete"
