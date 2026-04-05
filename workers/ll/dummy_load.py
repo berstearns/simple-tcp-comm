@@ -270,141 +270,132 @@ class State:
 
 # ── job generators ──────────────────────────────────────────────
 
+def _start_app(state, lid):
+    C = state.content
+    resp = submit("app_session_start", learner_id=lid)
+    result = wait_for_result(resp["id"])
+    state.active_app_sessions[lid] = result["app_session_id"]
+    return "app_start", resp
+
+def _start_comic(state, lid, asid):
+    C = state.content
+    cid = random.choice(C["comic_ids"])
+    resp = submit("comic_session_start", learner_id=lid, app_session_id=asid, comic_id=cid)
+    result = wait_for_result(resp["id"])
+    state.active_comic_sessions[asid] = (result["comic_session_id"], cid)
+    return "comic_start", resp
+
+def _start_page(state, lid, csid, cid):
+    C = state.content
+    pages = C["pages_by_comic"].get(cid, C["page_ids"])
+    page_id = random.choice(pages)
+    resp = submit("page_session_start", learner_id=lid, comic_session_id=csid, page_id=page_id)
+    result = wait_for_result(resp["id"])
+    state.active_page_sessions[csid] = (result["page_session_id"], page_id)
+    return "page_start", resp
+
+def _start_bubble(state, lid, psid, page_id):
+    C = state.content
+    bubbles = C["bubbles_by_page"].get(page_id, C["bubble_ids"]) or C["bubble_ids"]
+    bubble_id = random.choice(bubbles)
+    resp = submit("bubble_session_start", learner_id=lid, page_session_id=psid,
+                  bubble_id=bubble_id, trigger=random.choice(TRIGGERS),
+                  showed_translation=random.randint(0, 1), played_audio=random.randint(0, 1))
+    result = wait_for_result(resp["id"])
+    state.active_bubble_sessions[psid] = (result["bubble_session_id"], bubble_id)
+    return "bubble_start", resp
+
 def random_job(state):
     C = state.content
-    r = random.random()
     lid = random.choice(state.learner_ids)
 
-    # ── 15% — app session start/end ──
-    if r < 0.15:
-        if lid not in state.active_app_sessions:
-            resp = submit("app_session_start", learner_id=lid)
-            result = wait_for_result(resp["id"])
-            state.active_app_sessions[lid] = result["app_session_id"]
-            return "app_start", resp
-        else:
-            sid = state.active_app_sessions.pop(lid)
-            state._cascade_close(sid)
-            return "app_end", submit("app_session_end",
-                                     learner_id=lid, app_session_id=sid,
-                                     reason=random.choice(["background", "killed", "logout"]))
+    # ── determine learner's current depth ──
+    has_app = lid in state.active_app_sessions
+    if not has_app:
+        # no session at all — start one (or 5% query)
+        if random.random() < 0.95:
+            return _start_app(state, lid)
+        return "query", client.query("ll", "SELECT COUNT(*) AS n FROM events")
 
-    elif r < 0.20:
-        # ── 5% — app interaction ──
-        if lid in state.active_app_sessions:
-            return "app_interact", submit("app_interact",
-                                          learner_id=lid,
-                                          app_session_id=state.active_app_sessions[lid],
-                                          action=random.choice(APP_ACTIONS))
+    asid = state.active_app_sessions[lid]
+    has_comic = asid in state.active_comic_sessions
 
-    # ── 25% — comic session start ──
-    if r < 0.45:
-        if lid in state.active_app_sessions:
-            asid = state.active_app_sessions[lid]
-            if asid not in state.active_comic_sessions:
-                cid = random.choice(C["comic_ids"])
-                resp = submit("comic_session_start",
-                              learner_id=lid, app_session_id=asid, comic_id=cid)
-                result = wait_for_result(resp["id"])
-                csid = result["comic_session_id"]
-                state.active_comic_sessions[asid] = (csid, cid)
-                return "comic_start", resp
+    # ── 10% chance to tear down from current level ──
+    if random.random() < 0.10:
+        # close deepest active session for this learner
+        if has_comic:
+            csid, cid = state.active_comic_sessions[asid]
+            if csid in state.active_page_sessions:
+                psid, pid = state.active_page_sessions[csid]
+                if psid in state.active_bubble_sessions:
+                    bsid, bid = state.active_bubble_sessions.pop(psid)
+                    return "bubble_end", submit("bubble_session_end",
+                                                learner_id=lid, bubble_session_id=bsid,
+                                                showed_translation=random.randint(0, 1),
+                                                played_audio=random.randint(0, 1))
+                state.active_page_sessions.pop(csid)
+                return "page_end", submit("page_session_end",
+                                          learner_id=lid, page_session_id=psid,
+                                          scroll_depth=round(random.uniform(0.3, 1.0), 2))
+            state.active_comic_sessions.pop(asid)
+            return "comic_end", submit("comic_session_end",
+                                       learner_id=lid, comic_session_id=csid,
+                                       reason=random.choice(["back", "switch_comic", "app_bg"]))
+        # close app session
+        state.active_app_sessions.pop(lid)
+        state._cascade_close(asid)
+        return "app_end", submit("app_session_end",
+                                 learner_id=lid, app_session_id=asid,
+                                 reason=random.choice(["background", "killed", "logout"]))
 
-    # ── 25% — page session start / page interaction ──
-    if r < 0.70:
-        if lid in state.active_app_sessions:
-            asid = state.active_app_sessions[lid]
-            if asid in state.active_comic_sessions:
-                csid, cid = state.active_comic_sessions[asid]
-                if csid not in state.active_page_sessions:
-                    pages = C["pages_by_comic"].get(cid, C["page_ids"])
-                    page_id = random.choice(pages)
-                    resp = submit("page_session_start",
-                                  learner_id=lid, comic_session_id=csid, page_id=page_id)
-                    result = wait_for_result(resp["id"])
-                    psid = result["page_session_id"]
-                    state.active_page_sessions[csid] = (psid, page_id)
-                    return "page_start", resp
-                else:
-                    psid, cur_page = state.active_page_sessions[csid]
-                    action = random.choice(PAGE_ACTIONS)
-                    pages = C["pages_by_comic"].get(cid, C["page_ids"])
-                    to_page = random.choice(pages)
-                    return "page_interact", submit("page_interact",
-                                                   learner_id=lid, page_session_id=psid,
-                                                   action=action, to_page_id=to_page)
+    # ── 10% app-level interaction ──
+    if random.random() < 0.10:
+        return "app_interact", submit("app_interact",
+                                      learner_id=lid,
+                                      app_session_id=asid,
+                                      action=random.choice(APP_ACTIONS))
 
-    # ── 20% — bubble session ──
-    if r < 0.90:
-        if lid in state.active_app_sessions:
-            asid = state.active_app_sessions[lid]
-            if asid in state.active_comic_sessions:
-                csid, cid = state.active_comic_sessions[asid]
-                if csid in state.active_page_sessions:
-                    psid, page_id = state.active_page_sessions[csid]
-                    if psid not in state.active_bubble_sessions:
-                        bubbles = C["bubbles_by_page"].get(page_id, C["bubble_ids"])
-                        if not bubbles:
-                            bubbles = C["bubble_ids"]
-                        bubble_id = random.choice(bubbles)
-                        resp = submit("bubble_session_start",
-                                      learner_id=lid, page_session_id=psid,
-                                      bubble_id=bubble_id,
-                                      trigger=random.choice(TRIGGERS),
-                                      showed_translation=random.randint(0, 1),
-                                      played_audio=random.randint(0, 1))
-                        result = wait_for_result(resp["id"])
-                        bsid = result["bubble_session_id"]
-                        state.active_bubble_sessions[psid] = (bsid, bubble_id)
-                        return "bubble_start", resp
-                    else:
-                        bsid, bubble_id = state.active_bubble_sessions[psid]
-                        if random.random() < 0.4:
-                            ann_id = random.choice(C["annotation_ids"])
-                            return "annotate", submit("bubble_annotate",
-                                                      learner_id=lid,
-                                                      bubble_session_id=bsid,
-                                                      annotation_id=ann_id)
-                        else:
-                            words = C["words_by_bubble"].get(bubble_id, C["word_ids"])
-                            if not words:
-                                words = C["word_ids"]
-                            word_id = random.choice(words)
-                            return "word_tap", submit("word_interact",
-                                                      learner_id=lid,
-                                                      bubble_session_id=bsid,
-                                                      word_id=word_id,
-                                                      interaction=random.choice(WORD_INTERACTIONS),
-                                                      showed_translation=random.randint(0, 1),
-                                                      played_audio=random.randint(0, 1),
-                                                      added_to_vocab=1 if random.random() < 0.15 else 0)
+    # ── build hierarchy deeper if needed ──
+    if not has_comic:
+        return _start_comic(state, lid, asid)
 
-    # ── 5% — close bubble session ──
-    if r < 0.95:
-        for psid, (bsid, bid) in list(state.active_bubble_sessions.items()):
-            state.active_bubble_sessions.pop(psid)
-            return "bubble_end", submit("bubble_session_end",
-                                        learner_id=lid, bubble_session_id=bsid,
-                                        showed_translation=random.randint(0, 1),
-                                        played_audio=random.randint(0, 1))
+    csid, cid = state.active_comic_sessions[asid]
+    has_page = csid in state.active_page_sessions
 
-    # ── 3% — close page session ──
-    if r < 0.98:
-        for csid, (psid, pid) in list(state.active_page_sessions.items()):
-            state.active_page_sessions.pop(csid)
-            return "page_end", submit("page_session_end",
-                                      learner_id=lid, page_session_id=psid,
-                                      scroll_depth=round(random.uniform(0.3, 1.0), 2))
+    if not has_page:
+        return _start_page(state, lid, csid, cid)
 
-    # ── 2% — analytics queries ──
-    return "query", random.choice([
-        lambda: client.query("ll", "SELECT COUNT(*) AS n FROM events"),
-        lambda: client.query("ll", "SELECT event_name, COUNT(*) AS n FROM events GROUP BY event_name ORDER BY n DESC LIMIT 10"),
-        lambda: client.query("ll", "SELECT l.display_name, COUNT(e.id) AS events FROM learners l "
-                  "LEFT JOIN events e ON e.learner_id=l.id GROUP BY l.id ORDER BY events DESC LIMIT 5"),
-        lambda: client.query("ll", "SELECT entity_type, COUNT(*) AS n FROM events GROUP BY entity_type ORDER BY n DESC"),
-        lambda: client.query("ll", "SELECT COUNT(DISTINCT learner_id) AS active FROM app_sessions WHERE ended_at IS NULL"),
-    ])()
+    psid, page_id = state.active_page_sessions[csid]
+    has_bubble = psid in state.active_bubble_sessions
+
+    # ── 15% page-level interaction ──
+    if random.random() < 0.15:
+        pages = C["pages_by_comic"].get(cid, C["page_ids"])
+        to_page = random.choice(pages)
+        return "page_interact", submit("page_interact",
+                                       learner_id=lid, page_session_id=psid,
+                                       action=random.choice(PAGE_ACTIONS), to_page_id=to_page)
+
+    if not has_bubble:
+        return _start_bubble(state, lid, psid, page_id)
+
+    # ── at deepest level: interact with bubble ──
+    bsid, bubble_id = state.active_bubble_sessions[psid]
+    if random.random() < 0.4:
+        ann_id = random.choice(C["annotation_ids"])
+        return "annotate", submit("bubble_annotate",
+                                  learner_id=lid, bubble_session_id=bsid,
+                                  annotation_id=ann_id)
+    else:
+        words = C["words_by_bubble"].get(bubble_id, C["word_ids"]) or C["word_ids"]
+        word_id = random.choice(words)
+        return "word_tap", submit("word_interact",
+                                  learner_id=lid, bubble_session_id=bsid,
+                                  word_id=word_id,
+                                  interaction=random.choice(WORD_INTERACTIONS),
+                                  showed_translation=random.randint(0, 1),
+                                  played_audio=random.randint(0, 1),
+                                  added_to_vocab=1 if random.random() < 0.15 else 0)
 
 # ── main ────────────────────────────────────────────────────────
 
