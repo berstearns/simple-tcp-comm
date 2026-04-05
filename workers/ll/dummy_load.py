@@ -133,84 +133,87 @@ def rand_bbox():
     w, h = round(random.uniform(0.05, 0.3), 3), round(random.uniform(0.03, 0.15), 3)
     return x, y, w, h
 
-def q(sql, params=None):
-    return client.query("ll", sql, params or [])
+def _local_conn():
+    """Direct connection to local ll.db for seeding."""
+    c = sqlite3.connect(DBS["ll"])
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA foreign_keys=ON")
+    return c
 
 def submit(task, **kw):
     kw["task"] = task
     kw["db"] = "ll"
     return client.submit(kw)
 
-# ── seeding ─────────────────────────────────────────────────────
+# ── seeding (direct local db writes) ───────────────────────────
 
-def seed_comics():
-    """Insert comic catalog."""
+def seed_all(n_learners):
+    """Seed all reference data and learners directly into local ll.db."""
+    conn = _local_conn()
     now = int(time.time() * 1000)
-    ids = []
-    for slug, title, lang, diff, pages in COMICS:
-        resp = q("INSERT OR IGNORE INTO comics(slug, title, lang, difficulty, total_pages, created_at) "
-                 "VALUES(?, ?, ?, ?, ?, ?)", [slug, title, lang, diff, pages, now])
-        ids.append(slug)
-    return ids
 
-def seed_pages(comic_ids):
-    """Generate pages for each comic (fetch real comic IDs first)."""
-    rows = q("SELECT id, total_pages FROM comics")
-    if not rows.get("ok"):
-        time.sleep(1)
-        rows = client.status(rows["id"])
-    comics = []
-    resp = q("SELECT id, total_pages FROM comics")
-    # we'll just insert pages optimistically
-    for comic_idx, (slug, title, lang, diff, npages) in enumerate(COMICS):
-        cid = comic_idx + 1  # approximate
+    # annotations
+    for slug, label, icon, sort in ANNOTATIONS:
+        conn.execute("INSERT OR IGNORE INTO annotation_options(slug, label, icon, sort_order) "
+                     "VALUES(?, ?, ?, ?)", [slug, label, icon, sort])
+    print(f"  annotations: {len(ANNOTATIONS)}")
+
+    # comics
+    for slug, title, lang, diff, npages in COMICS:
+        conn.execute("INSERT OR IGNORE INTO comics(slug, title, lang, difficulty, total_pages, created_at) "
+                     "VALUES(?, ?, ?, ?, ?, ?)", [slug, title, lang, diff, npages, now])
+    print(f"  comics: {len(COMICS)}")
+
+    # pages
+    page_count = 0
+    comic_rows = conn.execute("SELECT id, total_pages FROM comics ORDER BY id").fetchall()
+    for cid, npages in comic_rows:
         for pn in range(1, npages + 1):
-            q("INSERT OR IGNORE INTO pages(comic_id, page_number, image_uri) VALUES(?, ?, ?)",
-              [cid, pn, f"assets/{slug}/page_{pn:03d}.webp"])
-        comics.append((cid, npages))
-    return comics
+            conn.execute("INSERT OR IGNORE INTO pages(comic_id, page_number, image_uri) VALUES(?, ?, ?)",
+                         [cid, pn, f"assets/comic_{cid}/page_{pn:03d}.webp"])
+            page_count += 1
+    print(f"  pages: {page_count}")
 
-def seed_bubbles_and_words():
-    """Sprinkle bubbles and words onto pages."""
-    resp = q("SELECT id FROM pages")
-    # approximate: just do first 50 pages
-    for page_id in range(1, 51):
+    # bubbles + words
+    page_ids = [r[0] for r in conn.execute("SELECT id FROM pages").fetchall()]
+    bubble_count = 0
+    word_count = 0
+    for page_id in page_ids[:50]:
         n_bubbles = random.randint(2, 6)
         for bi in range(n_bubbles):
             text, trans = random.choice(BUBBLE_TEXTS)
             bx, by, bw, bh = rand_bbox()
-            q("INSERT OR IGNORE INTO bubbles(page_id, bubble_index, bbox_x, bbox_y, bbox_w, bbox_h, "
-              "full_text, translation) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-              [page_id, bi, bx, by, bw, bh, text, trans])
-            # words inside this bubble
-            bubble_id_approx = (page_id - 1) * 6 + bi + 1
-            words_in = random.sample(WORD_POOL, k=min(random.randint(2, 5), len(WORD_POOL)))
-            for wi, (surface, lemma, pos, transl) in enumerate(words_in):
-                wx, wy, ww, wh = rand_bbox()
-                q("INSERT OR IGNORE INTO words(bubble_id, word_index, surface_form, lemma, pos, "
-                  "translation, bbox_x, bbox_y, bbox_w, bbox_h) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                  [bubble_id_approx, wi, surface, lemma, pos, transl, wx, wy, ww, wh])
+            conn.execute("INSERT OR IGNORE INTO bubbles(page_id, bubble_index, bbox_x, bbox_y, bbox_w, bbox_h, "
+                         "full_text, translation) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                         [page_id, bi, bx, by, bw, bh, text, trans])
+            bubble_count += 1
+    conn.commit()
+    # now insert words referencing actual bubble IDs
+    bubble_rows = conn.execute("SELECT id FROM bubbles").fetchall()
+    for (bid,) in bubble_rows:
+        words_in = random.sample(WORD_POOL, k=min(random.randint(2, 5), len(WORD_POOL)))
+        for wi, (surface, lemma, pos, transl) in enumerate(words_in):
+            wx, wy, ww, wh = rand_bbox()
+            conn.execute("INSERT OR IGNORE INTO words(bubble_id, word_index, surface_form, lemma, pos, "
+                         "translation, bbox_x, bbox_y, bbox_w, bbox_h) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                         [bid, wi, surface, lemma, pos, transl, wx, wy, ww, wh])
+            word_count += 1
+    print(f"  bubbles: {bubble_count}, words: {word_count}")
 
-def seed_annotations():
-    """Insert fixed annotation options."""
-    for slug, label, icon, sort in ANNOTATIONS:
-        q("INSERT OR IGNORE INTO annotation_options(slug, label, icon, sort_order) "
-          "VALUES(?, ?, ?, ?)", [slug, label, icon, sort])
-
-def seed_learners(n):
-    """Create n learners."""
-    ids = []
-    for _ in range(n):
+    # learners
+    learner_ids = []
+    for _ in range(n_learners):
         native, target = random.choice(LANG_PAIRS)
-        resp = submit("create_learner",
-                      device_id=rand_device(),
-                      display_name=rand_name(),
-                      native_lang=native,
-                      target_lang=target)
-        ids.append(resp.get("id", "?"))
-        print(f"  seeded learner job #{ids[-1]}")
-    time.sleep(2)
-    return list(range(1, n + 1))
+        cur = conn.execute(
+            "INSERT INTO learners(device_id, display_name, native_lang, target_lang, created_at, updated_at) "
+            "VALUES(?, ?, ?, ?, ?, ?)",
+            [rand_device(), rand_name(), native, target, now, now])
+        learner_ids.append(cur.lastrowid)
+    print(f"  learners: {len(learner_ids)}")
+
+    conn.commit()
+    conn.close()
+    return learner_ids
 
 # ── state tracking (in-memory, approximate) ─────────────────────
 
@@ -352,12 +355,12 @@ def random_job(state):
 
     # ── 2% — analytics queries ──
     return "query", random.choice([
-        lambda: q("SELECT COUNT(*) AS n FROM events"),
-        lambda: q("SELECT event_name, COUNT(*) AS n FROM events GROUP BY event_name ORDER BY n DESC LIMIT 10"),
-        lambda: q("SELECT l.display_name, COUNT(e.id) AS events FROM learners l "
+        lambda: client.query("ll", "SELECT COUNT(*) AS n FROM events"),
+        lambda: client.query("ll", "SELECT event_name, COUNT(*) AS n FROM events GROUP BY event_name ORDER BY n DESC LIMIT 10"),
+        lambda: client.query("ll", "SELECT l.display_name, COUNT(e.id) AS events FROM learners l "
                   "LEFT JOIN events e ON e.learner_id=l.id GROUP BY l.id ORDER BY events DESC LIMIT 5"),
-        lambda: q("SELECT entity_type, COUNT(*) AS n FROM events GROUP BY entity_type ORDER BY n DESC"),
-        lambda: q("SELECT COUNT(DISTINCT learner_id) AS active FROM app_sessions WHERE ended_at IS NULL"),
+        lambda: client.query("ll", "SELECT entity_type, COUNT(*) AS n FROM events GROUP BY entity_type ORDER BY n DESC"),
+        lambda: client.query("ll", "SELECT COUNT(DISTINCT learner_id) AS active FROM app_sessions WHERE ended_at IS NULL"),
     ])()
 
 # ── main ────────────────────────────────────────────────────────
@@ -370,18 +373,8 @@ if __name__ == "__main__":
     print("Ensuring ll schema...")
     _ensure_schema("ll")
 
-    print("Seeding annotation options...")
-    seed_annotations()
-
-    print("Seeding comics catalog...")
-    seed_comics()
-
-    print("Seeding pages, bubbles, words...")
-    seed_pages([])
-    seed_bubbles_and_words()
-
-    print(f"\nSeeding {seed_n} learners...")
-    learner_ids = seed_learners(seed_n)
+    print("Seeding local db...")
+    learner_ids = seed_all(seed_n)
 
     state = State(learner_ids)
     i = 0
