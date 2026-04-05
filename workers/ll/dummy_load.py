@@ -145,6 +145,38 @@ def submit(task, **kw):
     kw["db"] = "ll"
     return client.submit(kw)
 
+def wait_for_result(job_id, timeout=10, poll_interval=0.1):
+    """Poll until job completes and return its handler result dict."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        resp = client.status(job_id)
+        if resp.get("status") == "done":
+            return resp.get("result", {})
+        time.sleep(poll_interval)
+    raise TimeoutError(f"job {job_id} not done within {timeout}s")
+
+def load_content_ids():
+    """Query real IDs and relationship maps from local ll.db."""
+    conn = _local_conn()
+    content = {
+        "comic_ids":      [r[0] for r in conn.execute("SELECT id FROM comics").fetchall()],
+        "page_ids":       [r[0] for r in conn.execute("SELECT id FROM pages").fetchall()],
+        "bubble_ids":     [r[0] for r in conn.execute("SELECT id FROM bubbles").fetchall()],
+        "word_ids":       [r[0] for r in conn.execute("SELECT id FROM words").fetchall()],
+        "annotation_ids": [r[0] for r in conn.execute("SELECT id FROM annotation_options").fetchall()],
+        "pages_by_comic":  {},
+        "bubbles_by_page": {},
+        "words_by_bubble": {},
+    }
+    for cid, pid in conn.execute("SELECT comic_id, id FROM pages"):
+        content["pages_by_comic"].setdefault(cid, []).append(pid)
+    for pid, bid in conn.execute("SELECT page_id, id FROM bubbles"):
+        content["bubbles_by_page"].setdefault(pid, []).append(bid)
+    for bid, wid in conn.execute("SELECT bubble_id, id FROM words"):
+        content["words_by_bubble"].setdefault(bid, []).append(wid)
+    conn.close()
+    return content
+
 # ── seeding (direct local db writes) ───────────────────────────
 
 def seed_all(n_learners):
@@ -215,41 +247,44 @@ def seed_all(n_learners):
     conn.close()
     return learner_ids
 
-# ── state tracking (in-memory, approximate) ─────────────────────
+# ── state tracking (real DB IDs) ───────────────────────────────
 
 class State:
-    def __init__(self, learner_ids):
+    def __init__(self, learner_ids, content):
         self.learner_ids = learner_ids
-        self.active_app_sessions = {}      # learner_id -> app_session_id
-        self.active_comic_sessions = {}    # app_session_id -> (comic_session_id, comic_id)
-        self.active_page_sessions = {}     # comic_session_id -> (page_session_id, page_id)
-        self.active_bubble_sessions = {}   # page_session_id -> (bubble_session_id, bubble_id)
-        self.next_ids = {
-            "app_session": 1, "comic_session": 1, "page_session": 1,
-            "bubble_session": 1, "annotation": 1, "word_int": 1,
-        }
+        self.content = content              # from load_content_ids()
+        self.active_app_sessions = {}       # learner_id -> app_session_id (real)
+        self.active_comic_sessions = {}     # app_session_id -> (comic_session_id, comic_id) (real)
+        self.active_page_sessions = {}      # comic_session_id -> (page_session_id, page_id) (real)
+        self.active_bubble_sessions = {}    # page_session_id -> (bubble_session_id, bubble_id) (real)
 
-    def _inc(self, k):
-        v = self.next_ids[k]
-        self.next_ids[k] += 1
-        return v
+    def _cascade_close(self, app_session_id):
+        """Remove all child sessions under an app session."""
+        cs = self.active_comic_sessions.pop(app_session_id, None)
+        if cs:
+            csid, cid = cs
+            ps = self.active_page_sessions.pop(csid, None)
+            if ps:
+                psid, pid = ps
+                self.active_bubble_sessions.pop(psid, None)
 
 # ── job generators ──────────────────────────────────────────────
 
 def random_job(state):
+    C = state.content
     r = random.random()
     lid = random.choice(state.learner_ids)
 
-    # ── 25% — app session start/end ──
+    # ── 15% — app session start/end ──
     if r < 0.15:
         if lid not in state.active_app_sessions:
-            sid = state._inc("app_session")
-            state.active_app_sessions[lid] = sid
-            return "app_start", submit("app_session_start", learner_id=lid)
+            resp = submit("app_session_start", learner_id=lid)
+            result = wait_for_result(resp["id"])
+            state.active_app_sessions[lid] = result["app_session_id"]
+            return "app_start", resp
         else:
             sid = state.active_app_sessions.pop(lid)
-            # cascade close
-            state.active_comic_sessions.pop(sid, None)
+            state._cascade_close(sid)
             return "app_end", submit("app_session_end",
                                      learner_id=lid, app_session_id=sid,
                                      reason=random.choice(["background", "killed", "logout"]))
@@ -261,18 +296,19 @@ def random_job(state):
                                           learner_id=lid,
                                           app_session_id=state.active_app_sessions[lid],
                                           action=random.choice(APP_ACTIONS))
-        # fallthrough to comic session
 
     # ── 25% — comic session start ──
     if r < 0.45:
         if lid in state.active_app_sessions:
             asid = state.active_app_sessions[lid]
             if asid not in state.active_comic_sessions:
-                csid = state._inc("comic_session")
-                cid = random.randint(1, len(COMICS))
+                cid = random.choice(C["comic_ids"])
+                resp = submit("comic_session_start",
+                              learner_id=lid, app_session_id=asid, comic_id=cid)
+                result = wait_for_result(resp["id"])
+                csid = result["comic_session_id"]
                 state.active_comic_sessions[asid] = (csid, cid)
-                return "comic_start", submit("comic_session_start",
-                                             learner_id=lid, app_session_id=asid, comic_id=cid)
+                return "comic_start", resp
 
     # ── 25% — page session start / page interaction ──
     if r < 0.70:
@@ -281,18 +317,19 @@ def random_job(state):
             if asid in state.active_comic_sessions:
                 csid, cid = state.active_comic_sessions[asid]
                 if csid not in state.active_page_sessions:
-                    # start page session
-                    psid = state._inc("page_session")
-                    page_id = random.randint(1, 50)
+                    pages = C["pages_by_comic"].get(cid, C["page_ids"])
+                    page_id = random.choice(pages)
+                    resp = submit("page_session_start",
+                                  learner_id=lid, comic_session_id=csid, page_id=page_id)
+                    result = wait_for_result(resp["id"])
+                    psid = result["page_session_id"]
                     state.active_page_sessions[csid] = (psid, page_id)
-                    return "page_start", submit("page_session_start",
-                                                learner_id=lid, comic_session_id=csid, page_id=page_id)
+                    return "page_start", resp
                 else:
-                    # page interaction (navigate)
                     psid, cur_page = state.active_page_sessions[csid]
                     action = random.choice(PAGE_ACTIONS)
-                    to_page = cur_page + 1 if action == "next" else (cur_page - 1 if action == "prev" else cur_page)
-                    to_page = max(1, min(50, to_page))
+                    pages = C["pages_by_comic"].get(cid, C["page_ids"])
+                    to_page = random.choice(pages)
                     return "page_interact", submit("page_interact",
                                                    learner_id=lid, page_session_id=psid,
                                                    action=action, to_page_id=to_page)
@@ -306,27 +343,33 @@ def random_job(state):
                 if csid in state.active_page_sessions:
                     psid, page_id = state.active_page_sessions[csid]
                     if psid not in state.active_bubble_sessions:
-                        # open bubble
-                        bsid = state._inc("bubble_session")
-                        bubble_id = random.randint(1, 300)
+                        bubbles = C["bubbles_by_page"].get(page_id, C["bubble_ids"])
+                        if not bubbles:
+                            bubbles = C["bubble_ids"]
+                        bubble_id = random.choice(bubbles)
+                        resp = submit("bubble_session_start",
+                                      learner_id=lid, page_session_id=psid,
+                                      bubble_id=bubble_id,
+                                      trigger=random.choice(TRIGGERS),
+                                      showed_translation=random.randint(0, 1),
+                                      played_audio=random.randint(0, 1))
+                        result = wait_for_result(resp["id"])
+                        bsid = result["bubble_session_id"]
                         state.active_bubble_sessions[psid] = (bsid, bubble_id)
-                        return "bubble_start", submit("bubble_session_start",
-                                                      learner_id=lid, page_session_id=psid,
-                                                      bubble_id=bubble_id,
-                                                      trigger=random.choice(TRIGGERS),
-                                                      showed_translation=random.randint(0, 1),
-                                                      played_audio=random.randint(0, 1))
+                        return "bubble_start", resp
                     else:
                         bsid, bubble_id = state.active_bubble_sessions[psid]
-                        # 50% annotate, 50% word tap
                         if random.random() < 0.4:
-                            ann_id = random.randint(1, len(ANNOTATIONS))
+                            ann_id = random.choice(C["annotation_ids"])
                             return "annotate", submit("bubble_annotate",
                                                       learner_id=lid,
                                                       bubble_session_id=bsid,
                                                       annotation_id=ann_id)
                         else:
-                            word_id = random.randint(1, 500)
+                            words = C["words_by_bubble"].get(bubble_id, C["word_ids"])
+                            if not words:
+                                words = C["word_ids"]
+                            word_id = random.choice(words)
                             return "word_tap", submit("word_interact",
                                                       learner_id=lid,
                                                       bubble_session_id=bsid,
@@ -376,13 +419,22 @@ if __name__ == "__main__":
     print("Seeding local db...")
     learner_ids = seed_all(seed_n)
 
-    state = State(learner_ids)
+    print("Loading content IDs...")
+    content = load_content_ids()
+    print(f"  comics: {len(content['comic_ids'])}, pages: {len(content['page_ids'])}, "
+          f"bubbles: {len(content['bubble_ids'])}, words: {len(content['word_ids'])}")
+
+    state = State(learner_ids, content)
     i = 0
     print(f"\nSubmitting jobs every {delay}s (Ctrl-C to stop)")
-    print(f"  hierarchy: app → comic → page → bubble → word/annotation\n")
+    print(f"  hierarchy: app -> comic -> page -> bubble -> word/annotation\n")
     try:
         while count == 0 or i < count:
-            label, resp = random_job(state)
+            try:
+                label, resp = random_job(state)
+            except TimeoutError as e:
+                print(f"  [WARN] {e}")
+                continue
             i += 1
             jid = resp.get("id", "?")
             print(f"  [{i:>4}] {label:>15}  job #{jid}")
