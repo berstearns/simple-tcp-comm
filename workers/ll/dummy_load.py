@@ -9,10 +9,50 @@ Hierarchy exercised:
 
 Usage: python dummy_load.py [delay] [count] [seed_learners]
 """
-import time, random, string, json, sys, os
+import time, random, string, json, sys, os, re, sqlite3
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 import client
+
+REPO_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+
+def _parse_dbs():
+    raw = os.environ.get("QUEUE_DBS", "")
+    if raw:
+        return dict(pair.split("=", 1) for pair in raw.split(","))
+    return {"ll": "/var/lib/myapp/ll.db"}
+
+DBS = _parse_dbs()
+
+def _ensure_schema(db_name, schema_path=None):
+    db_path = DBS.get(db_name)
+    if not db_path:
+        return
+    if schema_path is None:
+        schema_path = os.path.join(REPO_DIR, "dbs", db_name, "head_schema", "schema.sql")
+    if not os.path.isfile(schema_path):
+        print(f"  WARN: schema file not found: {schema_path}")
+        return
+    with open(schema_path) as f:
+        sql = f.read()
+    expected = set(re.findall(r'CREATE\s+TABLE\s+(\w+)', sql, re.IGNORECASE))
+    if not expected:
+        print(f"  WARN: no CREATE TABLE found in {schema_path}")
+        return
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    if os.path.isfile(db_path):
+        conn = sqlite3.connect(db_path)
+        actual = set(r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall())
+        conn.close()
+        missing = expected - actual
+        if not missing:
+            return
+        print(f"  {db_name}: missing tables {missing}, recreating db")
+        os.remove(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(sql)
+    conn.close()
+    print(f"  {db_name}: schema applied from {schema_path}")
 
 # ── seed data ───────────────────────────────────────────────────
 
@@ -102,20 +142,6 @@ def submit(task, **kw):
     return client.submit(kw)
 
 # ── seeding ─────────────────────────────────────────────────────
-
-def seed_schema():
-    """Create all tables via the schema file."""
-    schema_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "..", "..", "dbs", "ll", "head_schema", "schema.sql")
-    with open(schema_path) as f:
-        schema = f.read()
-    # split on semicolons and run each statement
-    for stmt in schema.split(";"):
-        stmt = stmt.strip()
-        if stmt and not stmt.startswith("--"):
-            resp = q(stmt)
-            if resp.get("error"):
-                print(f"  schema warn: {resp['error'][:80]}")
 
 def seed_comics():
     """Insert comic catalog."""
@@ -341,8 +367,8 @@ if __name__ == "__main__":
     count = int(sys.argv[2]) if len(sys.argv) > 2 else 0
     seed_n = int(sys.argv[3]) if len(sys.argv) > 3 else 3
 
-    print("Setting up ll schema...")
-    seed_schema()
+    print("Ensuring ll schema...")
+    _ensure_schema("ll")
 
     print("Seeding annotation options...")
     seed_annotations()

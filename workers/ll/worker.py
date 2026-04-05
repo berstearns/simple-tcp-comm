@@ -50,8 +50,6 @@ def _ensure_schema(db_name, schema_path=None):
     conn.close()
     print(f"  {db_name}: schema applied from {schema_path}")
 
-_ensure_schema("ll")
-
 def _recv_exact(s, n):
     buf = b""
     while len(buf) < n:
@@ -372,6 +370,7 @@ def run_job(job_id, payload):
         return {"error": str(e)}
 
 if __name__ == "__main__":
+    _ensure_schema("ll")
     print(f"ll-worker '{WORKER_NAME}' v{VERSION} polling {SERVER[0]}:{SERVER[1]} every {POLL}s")
     print(f"  dbs: {DBS}")
     while not _shutdown:
