@@ -18,28 +18,39 @@ def _parse_dbs():
 DBS = _parse_dbs()
 REPO_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
-def _ensure_ll_schema():
-    db_path = DBS.get("ll")
+import re
+
+def _ensure_schema(db_name, schema_path=None):
+    db_path = DBS.get(db_name)
     if not db_path:
         return
-    schema_file = os.path.join(REPO_DIR, "dbs", "ll", "head_schema", "schema.sql")
-    if not os.path.isfile(schema_file):
-        print(f"  WARN: schema file not found: {schema_file}")
+    if schema_path is None:
+        schema_path = os.path.join(REPO_DIR, "dbs", db_name, "head_schema", "schema.sql")
+    if not os.path.isfile(schema_path):
+        print(f"  WARN: schema file not found: {schema_path}")
+        return
+    with open(schema_path) as f:
+        sql = f.read()
+    expected = set(re.findall(r'CREATE\s+TABLE\s+(\w+)', sql, re.IGNORECASE))
+    if not expected:
+        print(f"  WARN: no CREATE TABLE found in {schema_path}")
         return
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    if os.path.isfile(db_path):
+        conn = sqlite3.connect(db_path)
+        actual = set(r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall())
+        conn.close()
+        missing = expected - actual
+        if not missing:
+            return
+        print(f"  {db_name}: missing tables {missing}, recreating db")
+        os.remove(db_path)
     conn = sqlite3.connect(db_path)
-    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-    if "learners" not in tables:
-        print(f"  ll schema missing, applying {schema_file}")
-        with open(schema_file) as f:
-            sql = f.read()
-        sql = sql.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ")
-        sql = sql.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ")
-        conn.executescript(sql)
-        print(f"  ll schema applied to {db_path}")
+    conn.executescript(sql)
     conn.close()
+    print(f"  {db_name}: schema applied from {schema_path}")
 
-_ensure_ll_schema()
+_ensure_schema("ll")
 
 def _recv_exact(s, n):
     buf = b""
