@@ -32,7 +32,10 @@ def _ensure_ll_schema():
     if "learners" not in tables:
         print(f"  ll schema missing, applying {schema_file}")
         with open(schema_file) as f:
-            conn.executescript(f.read())
+            sql = f.read()
+        sql = sql.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ")
+        sql = sql.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ")
+        conn.executescript(sql)
         print(f"  ll schema applied to {db_path}")
     conn.close()
 
