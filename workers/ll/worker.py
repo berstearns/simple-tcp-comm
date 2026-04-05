@@ -16,6 +16,27 @@ def _parse_dbs():
     return {"ll": "/var/lib/myapp/ll.db"}
 
 DBS = _parse_dbs()
+REPO_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+
+def _ensure_ll_schema():
+    db_path = DBS.get("ll")
+    if not db_path:
+        return
+    schema_file = os.path.join(REPO_DIR, "dbs", "ll", "head_schema", "schema.sql")
+    if not os.path.isfile(schema_file):
+        print(f"  WARN: schema file not found: {schema_file}")
+        return
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    if "learners" not in tables:
+        print(f"  ll schema missing, applying {schema_file}")
+        with open(schema_file) as f:
+            conn.executescript(f.read())
+        print(f"  ll schema applied to {db_path}")
+    conn.close()
+
+_ensure_ll_schema()
 
 def _recv_exact(s, n):
     buf = b""
