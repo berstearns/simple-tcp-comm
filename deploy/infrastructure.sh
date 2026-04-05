@@ -8,18 +8,20 @@
 #   4. Sets correct permissions
 #   5. Creates .env if missing
 #
-# Usage:
-#   sudo ./infrastructure.sh            # full setup (needs root for /var/lib)
-#   ./infrastructure.sh --check         # dry-run: show what's missing
+# Usage (run from repo root):
+#   sudo deploy/infrastructure.sh            # full setup (needs root for /var/lib)
+#   deploy/infrastructure.sh --check         # dry-run: show what's missing
 #
 # Safe to re-run — all operations are idempotent.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DB_DIR="/var/lib/myapp"
 MAIN_DB="$DB_DIR/main.db"
 LOGS_DB="$DB_DIR/logs.db"
+APP7_DB="$DB_DIR/app7.db"
 
 # ── Colors ──────────────────────────────────────────────────
 RED='\033[91m'; GREEN='\033[92m'; YELLOW='\033[93m'; CYAN='\033[96m'
@@ -52,7 +54,7 @@ if [[ "${1:-}" == "--check" ]]; then
         errors=$((errors + 1))
     fi
 
-    for db in "$MAIN_DB" "$LOGS_DB"; do
+    for db in "$MAIN_DB" "$LOGS_DB" "$APP7_DB"; do
         if [[ -f "$db" ]]; then
             ok "database exists ($db)"
         else
@@ -61,8 +63,8 @@ if [[ "${1:-}" == "--check" ]]; then
         fi
     done
 
-    if [[ -f "$SCRIPT_DIR/.env" ]]; then
-        if grep -q "QUEUE_DBS" "$SCRIPT_DIR/.env"; then
+    if [[ -f "$REPO_DIR/.env" ]]; then
+        if grep -q "QUEUE_DBS" "$REPO_DIR/.env"; then
             ok ".env has QUEUE_DBS configured"
         else
             warn ".env exists but missing QUEUE_DBS"
@@ -77,7 +79,7 @@ if [[ "${1:-}" == "--check" ]]; then
     if [[ $errors -eq 0 ]]; then
         echo -e "${GREEN}${BOLD}All checks passed.${RESET}"
     else
-        echo -e "${RED}${BOLD}$errors issue(s) found.${RESET} Run: sudo ./infrastructure.sh"
+        echo -e "${RED}${BOLD}$errors issue(s) found.${RESET} Run: sudo deploy/infrastructure.sh"
     fi
     exit $errors
 fi
@@ -85,8 +87,8 @@ fi
 # ── Must run as root for /var/lib ───────────────────────────
 if [[ $EUID -ne 0 ]]; then
     echo -e "${RED}This script needs root to create $DB_DIR${RESET}"
-    echo "  Run: sudo ./infrastructure.sh"
-    echo "  Or:  ./infrastructure.sh --check  (no root needed)"
+    echo "  Run: sudo deploy/infrastructure.sh"
+    echo "  Or:  deploy/infrastructure.sh --check  (no root needed)"
     exit 1
 fi
 
@@ -171,11 +173,76 @@ init_db "$LOGS_DB" "logs.db" \
         ts DATETIME DEFAULT CURRENT_TIMESTAMP
     );"
 
+init_db "$APP7_DB" "app7.db" \
+    "CREATE TABLE IF NOT EXISTS session_events(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        eventType TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        durationMs INTEGER,
+        chapterName TEXT,
+        pageId TEXT,
+        pageTitle TEXT,
+        synced INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS annotation_records(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        imageId TEXT NOT NULL,
+        boxIndex INTEGER NOT NULL,
+        boxX REAL NOT NULL, boxY REAL NOT NULL,
+        boxWidth REAL NOT NULL, boxHeight REAL NOT NULL,
+        label TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        tapX REAL NOT NULL, tapY REAL NOT NULL,
+        regionType TEXT NOT NULL DEFAULT 'BUBBLE',
+        parentBubbleIndex INTEGER,
+        tokenIndex INTEGER,
+        synced INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS chat_messages(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender TEXT NOT NULL, text TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        synced INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS page_interactions(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        interactionType TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        chapterName TEXT, pageId TEXT,
+        normalizedX REAL, normalizedY REAL,
+        hitResult TEXT,
+        synced INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS app_launch_records(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        packageName TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        currentChapter TEXT, currentPageId TEXT,
+        synced INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS settings_changes(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        setting TEXT NOT NULL,
+        oldValue TEXT NOT NULL, newValue TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        synced INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS region_translations(
+        id TEXT PRIMARY KEY NOT NULL,
+        imageId TEXT NOT NULL,
+        bubbleIndex INTEGER NOT NULL,
+        originalText TEXT NOT NULL,
+        meaningTranslation TEXT NOT NULL,
+        literalTranslation TEXT NOT NULL,
+        sourceLanguage TEXT NOT NULL DEFAULT 'ja',
+        targetLanguage TEXT NOT NULL DEFAULT 'en'
+    );"
+
 # ── 4. Ensure .env has QUEUE_DBS ────────────────────────────
 echo -e "\n${BOLD}[4/5] Worker configuration (.env)${RESET}"
 
-ENV_FILE="$SCRIPT_DIR/.env"
-DBS_LINE="QUEUE_DBS=main=$MAIN_DB,logs=$LOGS_DB"
+ENV_FILE="$REPO_DIR/.env"
+DBS_LINE="QUEUE_DBS=main=$MAIN_DB,logs=$LOGS_DB,app7=$APP7_DB"
 
 if [[ -f "$ENV_FILE" ]]; then
     if grep -q "^QUEUE_DBS=" "$ENV_FILE"; then
@@ -210,8 +277,9 @@ echo -e "\n${GREEN}${BOLD}Infrastructure ready.${RESET}\n"
 echo -e "  Databases:"
 echo -e "    main → $MAIN_DB"
 echo -e "    logs → $LOGS_DB"
+echo -e "    app7 → $APP7_DB"
 echo -e ""
 echo -e "  Next steps:"
 echo -e "    1. Edit .env to set QUEUE_HOST to your server IP"
-echo -e "    2. Run: ${BOLD}./start_supervisor.sh${RESET}"
+echo -e "    2. Run: ${BOLD}deploy/start_supervisor.sh${RESET}"
 echo -e ""

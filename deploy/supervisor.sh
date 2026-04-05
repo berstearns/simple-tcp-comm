@@ -2,12 +2,12 @@
 # supervisor.sh — keeps worker running and auto-updates from a single branch.
 #
 # Usage:
-#   DEPLOY_BRANCH=main ./supervisor.sh
+#   DEPLOY_BRANCH=main deploy/supervisor.sh
 #
 # Env vars:
 #   DEPLOY_BRANCH   — git branch to track          (default: main)
 #   UPDATE_INTERVAL — seconds between update checks (default: 300 = 5 min)
-#   REPO_DIR        — path to the repo checkout     (default: script's directory)
+#   REPO_DIR        — path to the repo checkout     (default: parent of deploy/)
 #   WORKER_CMD      — command to start the worker   (default: python3 worker.py)
 #   GRACE_TIMEOUT   — seconds to wait for graceful  (default: 60)
 #                     shutdown before SIGKILL
@@ -16,7 +16,7 @@ set -euo pipefail
 
 DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
 UPDATE_INTERVAL="${UPDATE_INTERVAL:-300}"
-REPO_DIR="${REPO_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+REPO_DIR="${REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 WORKER_CMD="${WORKER_CMD:-python3 worker.py}"
 GRACE_TIMEOUT="${GRACE_TIMEOUT:-60}"
 
@@ -91,9 +91,9 @@ check_and_update() {
     log "pulled $DEPLOY_BRANCH @ $(git rev-parse --short HEAD)"
 
     # run migrations if the script exists
-    if [ -x "$REPO_DIR/migrate.sh" ]; then
+    if [ -x "$REPO_DIR/deploy/migrate.sh" ]; then
         log "running migrate.sh..."
-        if bash "$REPO_DIR/migrate.sh"; then
+        if bash "$REPO_DIR/deploy/migrate.sh"; then
             log "migrate.sh succeeded"
         else
             log "WARNING: migrate.sh failed (exit $?), starting worker anyway"
