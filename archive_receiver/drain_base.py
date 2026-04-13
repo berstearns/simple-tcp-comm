@@ -12,6 +12,7 @@ WORKER_DB = os.environ.get("WORKER_DB", "")
 WORKER_NAME = os.environ.get("WORKER_NAME", "drain-worker")
 DRAIN_INTERVAL = int(os.environ.get("DRAIN_INTERVAL", "300"))
 COLD_AGE_MS = int(os.environ.get("COLD_AGE_MS", "3600000"))  # 1 hour
+PURGE = os.environ.get("DRAIN_PURGE", "1") == "1"  # default ON: delete confirmed rows
 
 # ── Send one batch ───────────────────────────────────────────
 def send_batch(table_id, table_name, cols, rows, serialize_fn):
@@ -53,6 +54,15 @@ def send_batch(table_id, table_name, cols, rows, serialize_fn):
     finally:
         s.close()
 
+# ── Purge confirmed rows ─────────────────────────────────────
+def _purge_rows(db_path, table_name, row_ids):
+    """Delete confirmed rows from worker DB by id."""
+    db = sqlite3.connect(db_path)
+    placeholders = ",".join(["?"] * len(row_ids))
+    db.execute(f"DELETE FROM {table_name} WHERE id IN ({placeholders})", row_ids)
+    db.commit()
+    db.close()
+
 # ── Drain loop ───────────────────────────────────────────────
 def drain_loop(serialize_fn, one_shot=False):
     """Main drain loop. Set one_shot=True for testing (runs once, no sleep)."""
@@ -60,12 +70,20 @@ def drain_loop(serialize_fn, one_shot=False):
         print("WORKER_DB not set")
         sys.exit(1)
 
+    no_purge = "--no-purge" in sys.argv
+    purge = PURGE and not no_purge
+    if purge:
+        print(f"purge: ON (confirmed rows will be deleted from worker DB)")
+    else:
+        print(f"purge: OFF (worker DB is read-only)")
+
     batch_rows = 500  # starting point, adapts from receiver feedback
 
     while True:
         print(f"\n--- drain cycle {time.strftime('%H:%M:%S')} (batch_rows={batch_rows}) ---")
         db = sqlite3.connect(f"file:{WORKER_DB}?mode=ro", uri=True)
         total_sent = 0
+        total_purged = 0
 
         for table_id, table_name in enumerate(P.TABLE_NAMES):
             # check table exists
@@ -75,8 +93,9 @@ def drain_loop(serialize_fn, one_shot=False):
             if not exists:
                 continue
 
-            # fetch cold rows
-            if table_name in P.WATERMARK_TABLES:
+            # fetch rows
+            is_watermarked = table_name in P.WATERMARK_TABLES
+            if is_watermarked:
                 cur = db.execute(
                     f"SELECT * FROM {table_name} ORDER BY id LIMIT ?",
                     [batch_rows]
@@ -89,6 +108,9 @@ def drain_loop(serialize_fn, one_shot=False):
 
             if not rows:
                 continue
+
+            # track IDs for purge (column 0 = id for watermarked tables)
+            row_ids = [r[0] for r in rows] if is_watermarked else None
 
             result = send_batch(table_id, table_name, cols, rows, serialize_fn)
 
@@ -104,10 +126,19 @@ def drain_loop(serialize_fn, one_shot=False):
             inserted, skipped, next_max_rows = result
             total_sent += inserted
             batch_rows = next_max_rows
-            print(f"  {table_name}: sent={len(rows)} inserted={inserted} skipped={skipped} next_batch={next_max_rows}")
+
+            # purge confirmed rows from worker DB
+            purged = 0
+            if purge and is_watermarked and row_ids and (inserted + skipped) == len(rows):
+                _purge_rows(WORKER_DB, table_name, row_ids)
+                purged = len(row_ids)
+                total_purged += purged
+
+            suffix = f" purged={purged}" if purged else ""
+            print(f"  {table_name}: sent={len(rows)} inserted={inserted} skipped={skipped} next_batch={next_max_rows}{suffix}")
 
         db.close()
-        print(f"  total sent this cycle: {total_sent}")
+        print(f"  total sent this cycle: {total_sent}  purged: {total_purged}")
 
         if one_shot:
             break
