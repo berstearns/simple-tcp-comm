@@ -8,28 +8,35 @@ echo "  READING TIMELINE   $(date +%H:%M:%S)"
 echo "  $DB"
 echo "══════════════════════════════════════════════════════════════"
 echo
-echo "── Pages Entered ──"
+echo "── All Activity (most recent first) ──"
 sqlite3 -header -column "$DB" "
-SELECT datetime(timestamp/1000, 'unixepoch', 'localtime') AS time,
-       comic_id, chapter_name, page_title
-FROM session_events
-WHERE event_type = 'PAGE_ENTER'
-GROUP BY timestamp, comic_id, page_id
-ORDER BY timestamp DESC;"
-echo
-echo "── Page Interactions ──"
-sqlite3 -header -column "$DB" "
-SELECT datetime(timestamp/1000, 'unixepoch', 'localtime') AS time,
-       interaction_type, comic_id, chapter_name, page_id
-FROM page_interactions
-ORDER BY timestamp DESC;"
-echo
-echo "── Bubble Taps ──"
-sqlite3 -header -column "$DB" "
-SELECT datetime(timestamp/1000, 'unixepoch', 'localtime') AS time,
-       label, region_type, image_id, device_id
-FROM annotation_records
-ORDER BY timestamp DESC;"
+SELECT * FROM (
+  SELECT datetime(timestamp/1000, 'unixepoch', 'localtime') AS time,
+         'PAGE' AS type,
+         comic_id, device_id,
+         chapter_name || ' / ' || page_title AS detail
+  FROM session_events
+  WHERE event_type = 'PAGE_ENTER'
+  GROUP BY timestamp, comic_id, page_id
+
+  UNION ALL
+
+  SELECT datetime(timestamp/1000, 'unixepoch', 'localtime') AS time,
+         interaction_type AS type,
+         comic_id, device_id,
+         COALESCE(chapter_name,'') || ' / ' || COALESCE(page_id,'') || CASE WHEN hit_result IS NOT NULL THEN ' [' || hit_result || ']' ELSE '' END AS detail
+  FROM page_interactions
+
+  UNION ALL
+
+  SELECT datetime(timestamp/1000, 'unixepoch', 'localtime') AS time,
+         'ANNOTATE' AS type,
+         comic_id, device_id,
+         label || ' ' || region_type || ' ' || image_id AS detail
+  FROM annotation_records
+)
+ORDER BY time DESC
+LIMIT 60;"
 echo
 echo "── Totals ──"
 sqlite3 "$DB" "
@@ -37,4 +44,4 @@ SELECT COUNT(*) || ' page enters' FROM session_events WHERE event_type='PAGE_ENT
 UNION ALL
 SELECT COUNT(*) || ' interactions' FROM page_interactions
 UNION ALL
-SELECT COUNT(*) || ' bubble taps' FROM annotation_records;"
+SELECT COUNT(*) || ' annotations' FROM annotation_records;"
