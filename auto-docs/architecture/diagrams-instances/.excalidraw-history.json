@@ -1,0 +1,22 @@
+[
+  {
+    "path": "/home/b/simple-tcp-comm/auto-docs/architecture/diagrams-instances/system-overview.excalidraw",
+    "name": "system-overview.excalidraw",
+    "openedAt": "2026-04-13T11:12:18.151Z"
+  },
+  {
+    "path": "/home/b/simple-tcp-comm/auto-docs/architecture/diagrams-instances/job-queue-flow.excalidraw",
+    "name": "job-queue-flow.excalidraw",
+    "openedAt": "2026-04-13T11:11:33.011Z"
+  },
+  {
+    "path": "/home/b/simple-tcp-comm/auto-docs/architecture/diagrams-instances/collection-pipeline.excalidraw",
+    "name": "collection-pipeline.excalidraw",
+    "openedAt": "2026-04-13T11:10:20.675Z"
+  },
+  {
+    "path": "/home/b/simple-tcp-comm/auto-docs/architecture/diagrams-instances/archive-drain-flow.excalidraw",
+    "name": "archive-drain-flow.excalidraw",
+    "openedAt": "2026-04-13T11:09:47.731Z"
+  }
+]

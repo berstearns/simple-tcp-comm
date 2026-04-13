@@ -225,6 +225,28 @@ def _upsert_catalog(conn, tables):
         if iid:
             images.setdefault(iid, (None, None))
 
+    # v5: session hierarchy aggregates also carry comic_id (and sometimes
+    # chapter_name / page_id). Mine them so the catalog FKs hold even when
+    # the event tables are empty.
+    for s in tables.get("comic_sessions", []):
+        cid = s.get("comic_id")
+        if cid:
+            comics.add(cid)
+    for s in tables.get("chapter_sessions", []):
+        cid = s.get("comic_id")
+        chn = s.get("chapter_name")
+        if cid:
+            comics.add(cid)
+            if chn:
+                chapters.add((cid, chn))
+    for s in tables.get("page_sessions", []):
+        cid = s.get("comic_id")
+        pid = s.get("page_id")
+        if cid:
+            comics.add(cid)
+            if pid:
+                pages.setdefault((cid, pid), (None, None))
+
     if comics:
         conn.executemany(
             "INSERT OR IGNORE INTO comics(comic_id, added_at) VALUES (?, ?)",
@@ -379,6 +401,123 @@ def _ingest_translations(conn, device_id, user_id, rows):
         data)
     return cur.rowcount
 
+# ── session hierarchy inserters (v5) ──────────────────────────
+
+def _ingest_app_sessions(conn, device_id, user_id, rows):
+    if not rows:
+        return 0
+    data = [(device_id, user_id, r["local_id"],
+             r["start_ts"], r.get("end_ts"), r.get("duration_ms"),
+             r.get("app_version", ""),
+             _b(r.get("synced", False)))
+            for r in rows]
+    cur = conn.executemany(
+        """INSERT OR IGNORE INTO app_sessions
+             (device_id, user_id, local_id,
+              start_ts, end_ts, duration_ms, app_version, synced)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        data)
+    return cur.rowcount
+
+def _ingest_comic_sessions(conn, device_id, user_id, rows):
+    if not rows:
+        return 0
+    data = [(device_id, user_id, r["local_id"],
+             r["app_session_local_id"], r["comic_id"],
+             r["start_ts"], r.get("end_ts"), r.get("duration_ms"),
+             r.get("pages_read"),
+             _b(r.get("synced", False)))
+            for r in rows]
+    cur = conn.executemany(
+        """INSERT OR IGNORE INTO comic_sessions
+             (device_id, user_id, local_id,
+              app_session_local_id, comic_id,
+              start_ts, end_ts, duration_ms, pages_read, synced)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        data)
+    return cur.rowcount
+
+def _ingest_chapter_sessions(conn, device_id, user_id, rows):
+    if not rows:
+        return 0
+    data = [(device_id, user_id, r["local_id"],
+             r["comic_session_local_id"], r["comic_id"], r["chapter_name"],
+             r["start_ts"], r.get("end_ts"), r.get("duration_ms"),
+             r.get("pages_visited"),
+             _b(r.get("synced", False)))
+            for r in rows]
+    cur = conn.executemany(
+        """INSERT OR IGNORE INTO chapter_sessions
+             (device_id, user_id, local_id,
+              comic_session_local_id, comic_id, chapter_name,
+              start_ts, end_ts, duration_ms, pages_visited, synced)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        data)
+    return cur.rowcount
+
+def _force_close_orphans(conn, device_id):
+    """Objective 24: close any session-hierarchy row whose end_ts is still
+    NULL but has a strictly-newer sibling of the same type for this device.
+
+    Runs AFTER all inserts in the current batch. Idempotent — re-running on
+    an already-closed DB is a no-op because it only touches rows with
+    end_ts IS NULL that have a newer sibling.
+
+    Newer = a row with the same device_id AND strictly larger start_ts.
+    The close_ts is the newer sibling's start_ts, so the orphan's
+    duration_ms is set to (new.start_ts - orphan.start_ts). This matches
+    the plan: "set end_ts = start_ts_of_new + 0".
+    """
+    # app_sessions / comic_sessions / chapter_sessions all share the
+    # (start_ts, end_ts) shape. page_sessions uses (enter_ts, leave_ts).
+    for table, start_col, end_col, dur_col in (
+        ("app_sessions",     "start_ts", "end_ts",   "duration_ms"),
+        ("comic_sessions",   "start_ts", "end_ts",   "duration_ms"),
+        ("chapter_sessions", "start_ts", "end_ts",   "duration_ms"),
+        ("page_sessions",    "enter_ts", "leave_ts", "dwell_ms"),
+    ):
+        conn.execute(f"""
+            UPDATE {table}
+               SET {end_col} = (
+                       SELECT MIN(newer.{start_col})
+                         FROM {table} AS newer
+                        WHERE newer.device_id = {table}.device_id
+                          AND newer.{start_col} > {table}.{start_col}
+                   ),
+                   {dur_col} = (
+                       SELECT MIN(newer.{start_col})
+                         FROM {table} AS newer
+                        WHERE newer.device_id = {table}.device_id
+                          AND newer.{start_col} > {table}.{start_col}
+                   ) - {start_col},
+                   close_reason = 'force_closed_by_new_session'
+             WHERE device_id = ?
+               AND {end_col} IS NULL
+               AND EXISTS (
+                   SELECT 1 FROM {table} AS newer
+                    WHERE newer.device_id = {table}.device_id
+                      AND newer.{start_col} > {table}.{start_col}
+               )
+        """, [device_id])
+
+def _ingest_page_sessions(conn, device_id, user_id, rows):
+    if not rows:
+        return 0
+    data = [(device_id, user_id, r["local_id"],
+             r["chapter_session_local_id"], r["comic_id"], r["page_id"],
+             r["enter_ts"], r.get("leave_ts"), r.get("dwell_ms"),
+             r.get("interactions_n", 0),
+             _b(r.get("synced", False)))
+            for r in rows]
+    cur = conn.executemany(
+        """INSERT OR IGNORE INTO page_sessions
+             (device_id, user_id, local_id,
+              chapter_session_local_id, comic_id, page_id,
+              enter_ts, leave_ts, dwell_ms, interactions_n, synced)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        data)
+    return cur.rowcount
+
 # ── main handler ──────────────────────────────────────────────
 
 @job("ingest_unified_payload")
@@ -388,8 +527,9 @@ def _ingest_unified_payload(p):
     u = p.get("unified_payload") if isinstance(p.get("unified_payload"), dict) else p
     schema_version = u.get("schema_version")
     # v3 = pre-hierarchy (comic_id missing, treated as '_no_comic_')
-    # v4 = comic_id present on event rows
-    if schema_version not in (3, 4):
+    # v4 = comic_id present on event rows, no session hierarchy
+    # v5 = session hierarchy aggregates (app/comic/chapter/page sessions)
+    if schema_version not in (3, 4, 5):
         return {"accepted": False, "error": f"unsupported schema_version: {schema_version}"}
     mode = u.get("mode")
     if mode not in ("sync", "export"):
@@ -426,7 +566,20 @@ def _ingest_unified_payload(p):
                 "app_launch_records":  _ingest_app_launches(conn, device_id, user_id, tables.get("app_launch_records", [])),
                 "settings_changes":    _ingest_settings(conn, device_id, user_id, tables.get("settings_changes", [])),
                 "region_translations": _ingest_translations(conn, device_id, user_id, tables.get("region_translations", [])),
+                # v5 session hierarchy
+                "app_sessions":        _ingest_app_sessions(conn, device_id, user_id, tables.get("app_sessions", [])),
+                "comic_sessions":      _ingest_comic_sessions(conn, device_id, user_id, tables.get("comic_sessions", [])),
+                "chapter_sessions":    _ingest_chapter_sessions(conn, device_id, user_id, tables.get("chapter_sessions", [])),
+                "page_sessions":       _ingest_page_sessions(conn, device_id, user_id, tables.get("page_sessions", [])),
             }
+            # v5 objective 24: close-out policy for orphaned session rows.
+            # Force-close any row whose end_ts/leave_ts is still NULL but
+            # which has a strictly-newer sibling of the same type for the
+            # same device. "Strictly newer" = start_ts > this row's start_ts.
+            # The close_ts we write is the min start_ts of the newer sibling,
+            # so duration_ms is at worst an overestimate that's still bounded
+            # by reality.
+            _force_close_orphans(conn, device_id)
     finally:
         conn.close()
 

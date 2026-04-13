@@ -355,20 +355,24 @@ def _ingest_translations(conn, device_id, user_id, rows):
 
 @job("ingest_unified_payload")
 def _ingest_unified_payload(p):
-    schema_version = p.get("schema_version")
+    # Clone-specific: Android TcpQueueSyncApi nests all UnifiedPayload fields
+    # under a "unified_payload" key, while canonical senders put them flat at
+    # the top level. Accept both shapes transparently.
+    u = p.get("unified_payload") if isinstance(p.get("unified_payload"), dict) else p
+    schema_version = u.get("schema_version")
     if schema_version != 3:
         return {"accepted": False, "error": f"unsupported schema_version: {schema_version}"}
-    mode = p.get("mode")
+    mode = u.get("mode")
     if mode not in ("sync", "export"):
         return {"accepted": False, "error": f"invalid mode: {mode}"}
-    device_id = p.get("device_id")
+    device_id = u.get("device_id")
     if not device_id:
         return {"accepted": False, "error": "missing device_id"}
 
-    user_id = p.get("user_id")
-    app_version = p.get("app_version", "")
-    export_ts = p.get("export_timestamp", 0)
-    tables = p.get("tables") or {}
+    user_id = u.get("user_id")
+    app_version = u.get("app_version", "")
+    export_ts = u.get("export_timestamp", 0)
+    tables = u.get("tables") or {}
     sent_counts = {k: len(v) for k, v in tables.items() if isinstance(v, list)}
 
     conn = _conn()

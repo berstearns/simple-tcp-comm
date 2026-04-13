@@ -204,3 +204,89 @@ CREATE TABLE region_translations (
     UNIQUE(image_id, bubble_index)
 );
 CREATE INDEX idx_translations_image ON region_translations(image_id);
+
+-- ══════════════════════════════════════════════════════════════
+-- Session hierarchy aggregate tables (Part 2)
+-- ══════════════════════════════════════════════════════════════
+-- Mirror of the producer-side Room entities. Populated by the worker's
+-- ingest handler from UnifiedPayload schema_version=5 onward. Each
+-- level is a parent-child aggregate with start_ts/end_ts semantics;
+-- end_ts=NULL means the session was still live at send time and the
+-- close-out policy (objective 24) decides what to do with orphans.
+--
+-- Idempotency: every row carries (device_id, local_id) where local_id
+-- is the producer's Room PK, so re-sending the same batch is a no-op
+-- via INSERT OR IGNORE.
+
+CREATE TABLE app_sessions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id     TEXT    NOT NULL,
+    user_id       TEXT,
+    local_id      INTEGER NOT NULL,
+    start_ts      INTEGER NOT NULL,
+    end_ts        INTEGER,
+    duration_ms   INTEGER,
+    app_version   TEXT    NOT NULL DEFAULT '',
+    close_reason  TEXT,
+    synced        INTEGER NOT NULL DEFAULT 0 CHECK(synced IN (0,1)),
+    UNIQUE(device_id, local_id)
+);
+CREATE INDEX idx_app_sessions_start  ON app_sessions(start_ts);
+CREATE INDEX idx_app_sessions_device ON app_sessions(device_id, start_ts);
+
+CREATE TABLE comic_sessions (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id         TEXT    NOT NULL,
+    user_id           TEXT,
+    local_id          INTEGER NOT NULL,
+    app_session_local_id INTEGER NOT NULL,   -- producer-side Room id of the parent; resolved to worker-side id via (device_id, local_id) join
+    comic_id          TEXT    NOT NULL REFERENCES comics(comic_id),
+    start_ts          INTEGER NOT NULL,
+    end_ts            INTEGER,
+    duration_ms       INTEGER,
+    pages_read        INTEGER,
+    close_reason      TEXT,
+    synced            INTEGER NOT NULL DEFAULT 0 CHECK(synced IN (0,1)),
+    UNIQUE(device_id, local_id)
+);
+CREATE INDEX idx_comic_sessions_app    ON comic_sessions(device_id, app_session_local_id);
+CREATE INDEX idx_comic_sessions_device ON comic_sessions(device_id, start_ts);
+
+CREATE TABLE chapter_sessions (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id              TEXT    NOT NULL,
+    user_id                TEXT,
+    local_id               INTEGER NOT NULL,
+    comic_session_local_id INTEGER NOT NULL,
+    comic_id               TEXT    NOT NULL,
+    chapter_name           TEXT    NOT NULL,
+    start_ts               INTEGER NOT NULL,
+    end_ts                 INTEGER,
+    duration_ms            INTEGER,
+    pages_visited          INTEGER,
+    close_reason           TEXT,
+    synced                 INTEGER NOT NULL DEFAULT 0 CHECK(synced IN (0,1)),
+    UNIQUE(device_id, local_id),
+    FOREIGN KEY (comic_id, chapter_name) REFERENCES chapters(comic_id, chapter_name)
+);
+CREATE INDEX idx_chapter_sessions_comic  ON chapter_sessions(device_id, comic_session_local_id);
+CREATE INDEX idx_chapter_sessions_device ON chapter_sessions(device_id, start_ts);
+
+CREATE TABLE page_sessions (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id                TEXT    NOT NULL,
+    user_id                  TEXT,
+    local_id                 INTEGER NOT NULL,
+    chapter_session_local_id INTEGER NOT NULL,
+    comic_id                 TEXT    NOT NULL,
+    page_id                  TEXT    NOT NULL,
+    enter_ts                 INTEGER NOT NULL,
+    leave_ts                 INTEGER,
+    dwell_ms                 INTEGER,
+    interactions_n           INTEGER NOT NULL DEFAULT 0,
+    close_reason             TEXT,
+    synced                   INTEGER NOT NULL DEFAULT 0 CHECK(synced IN (0,1)),
+    UNIQUE(device_id, local_id)
+);
+CREATE INDEX idx_page_sessions_chapter ON page_sessions(device_id, chapter_session_local_id);
+CREATE INDEX idx_page_sessions_device  ON page_sessions(device_id, enter_ts);
