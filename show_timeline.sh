@@ -15,21 +15,21 @@ SELECT datetime(timestamp/1000, 'unixepoch', 'localtime') AS time,
 FROM session_events
 WHERE event_type = 'PAGE_ENTER'
 GROUP BY timestamp, comic_id, page_id
-ORDER BY timestamp;"
+ORDER BY timestamp DESC;"
 echo
 echo "── Page Interactions ──"
 sqlite3 -header -column "$DB" "
 SELECT datetime(timestamp/1000, 'unixepoch', 'localtime') AS time,
        interaction_type, comic_id, chapter_name, page_id
 FROM page_interactions
-ORDER BY timestamp;"
+ORDER BY timestamp DESC;"
 echo
 echo "── Bubble Taps ──"
 sqlite3 -header -column "$DB" "
 SELECT datetime(timestamp/1000, 'unixepoch', 'localtime') AS time,
-       label, region_type, image_id
+       label, region_type, image_id, device_id
 FROM annotation_records
-ORDER BY timestamp;"
+ORDER BY timestamp DESC;"
 echo
 echo "── Totals ──"
 sqlite3 "$DB" "
